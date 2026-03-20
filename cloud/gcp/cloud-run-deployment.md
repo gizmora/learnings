@@ -1,106 +1,133 @@
+# Deploying to Cloud Run with Cloud Build
+
+This guide walks you through deploying a Node.js app to Google Cloud Run using a single `gcloud builds submit` command.
+
+---
+
 ## Prerequisites
 
-1. Authenticated either via ADC or using Service account.
-   - Service account and/or user credentials should have sufficient role permissions in order to deploy/build using cloudbuild.
-   - For this example, the roles needed are:
-     - [ ] Cloud Build Editor
-     - [ ] Cloud Run Admin / invoker
-   - Needed roles will vary depending on the app you are serving.
+### 1. Authentication & Permissions
 
-  
-2. Creating your dockerfile
-   - The contents of your dockerfile will solely depend on what your project needs and used.
-   - In this example, it is a simple node.js server.
+Make sure you're authenticated with GCP — either through **Application Default Credentials (ADC)** or a **Service Account**.
+
+Your account needs at least these roles:
+
+| Role | Purpose |
+|------|---------|
+| Cloud Build Editor | To trigger and run builds |
+| Cloud Run Admin / Invoker | To deploy and manage Cloud Run services |
+
+> The exact roles you need may vary depending on your app.
+
+---
+
+### 2. Create a Dockerfile
+
+The Dockerfile tells Docker how to build and run your app. Here's an example for a Node.js TypeScript project:
+
 ```dockerfile
-# 1. BASE ENVIRONMENT SELECTION
-# This instruction selects a pre-configured, minimal operating environment 
-# containing the necessary runtime and system libraries. Using a 
-# specialized "alpine" version ensures a smaller, more secure footprint.
+# Use a lightweight Node.js image as the base
 FROM node:19-alpine
 
-# 2. WORKSPACE INITIALIZATION
-# This directive establishes the primary directory within the virtual 
-# environment where all subsequent application operations will occur.
+# Set the working directory inside the container
 WORKDIR /usr/src/app
 
-# 3. DEPENDENCY OPTIMIZATION
-# These manifests are transferred independently. By isolating the 
-# configuration of external libraries, the system can skip the 
-# installation phase in future builds if the dependencies remain unchanged.
+# Copy dependency files first (this lets Docker cache the npm install step)
 COPY package*.json tsconfig.json ./
 
-# 4. EXTERNAL LIBRARY INSTALLATION
-# This command executes the package manager to download and configure 
-# all external code libraries required for the application to function.
+# Install dependencies
 RUN npm install
 
-# 5. SOURCE CODE TRANSFER
-# This step transfers the application's unique source code from the 
-# development environment into the virtual workspace.
+# Copy the rest of your source code
 COPY . ./
 
-# 6. COMPILATION PHASE
-# This instruction converts the human-readable source code into a 
-# specialized format optimized for execution by the runtime environment.
+# Build the TypeScript source into JavaScript
 RUN npm run build
 
-# 7. CONFIGURATION INJECTION
-# These directives allow external metadata to be passed into the 
-# environment during the creation process and stored for use while 
-# the application is active.
+# Accept the GCP project ID as a build argument and store it as an env variable
 ARG PROJECT_ID
 ENV PROJECT_ID=$PROJECT_ID
 
-# 8. EXECUTION PROTOCOL
-# This defines the specific command that initializes the application 
-# whenever the environment is activated.
+# Start the app
 CMD ["node", "dist/server.js"]
 ```
 
+> **Why copy `package.json` before the source code?**
+> Docker builds in layers and caches each step. Copying dependency files first means Docker can skip `npm install` on future builds if your dependencies haven't changed — saving time.
 
-3. Building your cloudbuild file to building to deploying your app using one command.
+---
+
+### 3. Create a `cloudbuild.yaml` File
+
+This file defines the build-and-deploy pipeline that Cloud Build will run. Replace all `<PLACEHOLDER>` values with your own.
+
 ```yaml
-# This configuration file defines a sequenced automation for application delivery.
 steps:
-  # STEP 1: Building your Docker Image.
-  # This step bundles the application source code and its required environment
-  # into a single, immutable package. This ensures the software runs 
-  # consistently across different computing environments.
+  # Step 1: Build the Docker image
+  # Packages your app + environment into a container image.
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '--build-arg', 'PROJECT_ID=$PROJECT_ID', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>', '.']
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'PROJECT_ID=$PROJECT_ID'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>'
+      - '.'
 
-  # STEP 2: Uploading your docker image to Artifact Registry
-  # This step moves the completed application package from the local 
-  # build environment to your selected artifact registry repo. 
-  # This makes the package accessible for future retrieval and deployment.
+  # Step 2: Push the image to Artifact Registry
+  # Uploads the image so Cloud Run can pull it during deployment.
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>']
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>'
 
-  # STEP 3: ACTIVATION AND HOSTING
-  # This step instructs the hosting service to retrieve the docker image
-  # and start the application. It defines the physical location of the 
-  # servers, allows public network access, and sets a specific 
-  # identification variable for the application to use during runtime.
+  # Step 3: Deploy to Cloud Run
+  # Tells Cloud Run to pull the image and start serving it.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args:
-      [
-        'run',
-        'deploy',
-        <CLOUD_RUN_SERVICE_NAME>, #ex: 'test-project'
-        '--image',
-        'us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>',
-        '--region',
-        '<REGION>',
-        '--platform',
-        'managed',
-        '--allow-unauthenticated', # Grants access to users on the public internet
-        '--set-env-vars',
-        'PROJECT_ID=<GCP_PROJECT_ID>' # Injects a specific project name into the program
-      ]
+      - 'run'
+      - 'deploy'
+      - '<CLOUD_RUN_SERVICE_NAME>'       # e.g. 'my-app'
+      - '--image'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>'
+      - '--region'
+      - '<REGION>'                        # e.g. 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'         # Makes the service publicly accessible
+      - '--set-env-vars'
+      - 'PROJECT_ID=<GCP_PROJECT_ID>'     # Passes your project ID into the running container
 
-# RECORD KEEPING: 
-# This final section explicitly tracks the specific application package 
-# that was produced and stored during this automated sequence.
-images: ['us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>']
+# Tells Cloud Build to track this image in its build artifacts
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/<ARTIFACT_REGISTRY_FOLDER>/<DOCKER_IMAGE_NAME>:<TAG>'
 ```
+
+---
+
+## Placeholders Reference
+
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `<ARTIFACT_REGISTRY_FOLDER>` | Your Artifact Registry repository name | `my-repo` |
+| `<DOCKER_IMAGE_NAME>` | Name to give your Docker image | `my-app` |
+| `<TAG>` | Version tag for the image | `latest` or `v1.0` |
+| `<CLOUD_RUN_SERVICE_NAME>` | Name of your Cloud Run service | `my-app` |
+| `<REGION>` | GCP region to deploy to | `us-central1` |
+| `<GCP_PROJECT_ID>` | Your GCP project ID | `my-project-123` |
+
+---
+
+## Running the Deployment
+
+Once your files are in place, trigger the build with:
+
+```bash
+gcloud builds submit --config cloudbuild.yaml
+```
+
+This single command will:
+1. Build your Docker image
+2. Push it to Artifact Registry
+3. Deploy it to Cloud Run
