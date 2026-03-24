@@ -2,26 +2,13 @@
 
 This guide walks you through deploying a Node.js app to Google Cloud Run using a single `gcloud builds submit` command.
 
+> Before continuing, make sure you've completed the steps in [gcp-setup.md](gcp-setup.md) — authentication, Cloud Build permissions, and creating your Artifact Registry repository.
+
 ---
 
 ## Prerequisites
 
-### 1. Authentication & Permissions
-
-Make sure you're authenticated with GCP — either through **Application Default Credentials (ADC)** or a **Service Account**.
-
-Your account needs at least these roles:
-
-| Role | Purpose |
-|------|---------|
-| Cloud Build Editor | To trigger and run builds |
-| Cloud Run Admin / Invoker | To deploy and manage Cloud Run services |
-
-> The exact roles you need may vary depending on your app.
-
----
-
-### 2. Create a Dockerfile
+### 1. Create a Dockerfile
 
 The Dockerfile tells Docker how to build and run your app. Here's an example for a Node.js TypeScript project:
 
@@ -48,12 +35,29 @@ RUN npm run build
 ARG PROJECT_ID
 ENV PROJECT_ID=$PROJECT_ID
 
+# Cloud Run injects a PORT env variable — your app must listen on it
+EXPOSE 8080
+
 # Start the app
 CMD ["node", "dist/server.js"]
 ```
 
 > **Why copy `package.json` before the source code?**
 > Docker builds in layers and caches each step. Copying dependency files first means Docker can skip `npm install` on future builds if your dependencies haven't changed — saving time.
+
+> **PORT:** Cloud Run sets a `PORT` environment variable (default `8080`) and routes traffic to it. Make sure your app reads from `process.env.PORT` rather than hardcoding a port number.
+
+### 2. Create a `.dockerignore` File
+
+Prevents unnecessary files from being sent to Cloud Build, keeping builds fast.
+
+```
+node_modules
+dist
+.git
+.env
+*.log
+```
 
 ---
 
